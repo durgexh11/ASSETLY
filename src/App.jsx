@@ -119,26 +119,38 @@ function App() {
 
   const featured = visible.filter(item => item.featured).slice(0, 3);
   const downloadResource = async (item) => {
-    if (String(item.id).startsWith("demo-") || item.file_url === "#") {
-      flash("Demo item only — connect Supabase and upload your own file to enable downloads.");
+    if (String(item.id).startsWith("demo-") || !item.file_url || item.file_url === "#") {
+      flash("Demo item only — upload a real file to enable downloads.");
       return;
     }
+
     try {
+      // Supabase Storage supports the `download` query parameter. It asks
+      // Storage to return Content-Disposition: attachment, which works more
+      // reliably on mobile browsers than the HTML download attribute on a
+      // cross-origin URL.
+      const fileName = safeFileName(item.file_name || item.title || "assetly-download");
+      const downloadUrl = new URL(item.file_url, window.location.origin);
+      if (!["https:", "http:"].includes(downloadUrl.protocol)) {
+        throw new Error("This resource has an invalid download URL.");
+      }
+      downloadUrl.searchParams.set("download", fileName);
+
+      // Update the counter first so navigation does not interrupt the RPC.
       if (supabase) {
         const { error } = await supabase.rpc("increment_resource_downloads", { resource_id: item.id });
         if (error) console.warn("Download counter was not updated:", error.message);
       }
-      const link = document.createElement("a");
-      link.href = item.file_url;
-      link.download = safeFileName(item.file_name || item.title || "assetly-download");
-      link.target = "_blank";
-      link.rel = "noopener noreferrer";
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      setResources(prev => prev.map(r => r.id === item.id ? { ...r, downloads:(r.downloads || 0) + 1 } : r));
+
+      setResources(prev => prev.map(r =>
+        r.id === item.id ? { ...r, downloads: (r.downloads || 0) + 1 } : r
+      ));
+
+      // Navigate directly to the attachment response. Avoid fetching the
+      // whole file into memory, which can fail for large files on phones.
+      window.location.assign(downloadUrl.toString());
     } catch (error) {
-      flash(`Download could not start: ${error.message}`);
+      flash(`Download could not start: ${error.message || "Please try again."}`);
     }
   };
 
