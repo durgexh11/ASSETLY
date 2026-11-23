@@ -40,3 +40,16 @@ The existing `supabase/schema.sql` is retained. Do not rerun the schema or reset
 - `public/assets/assetly-mark.png` — browser favicon / app icon
 
 The redesign keeps the existing resource, auth, admin, upload, edit, delete, and download flows.
+
+
+## Resource action types upgrade
+
+ASSETLY supports three resource actions:
+
+- **Download** — upload a file to Supabase Storage.
+- **Visit** — send visitors to an external website or app link.
+- **Copy** — show text such as prompts, commands, or templates with a copy button.
+
+If your Supabase database already exists, run `supabase/migrations/20261122_resource_action_types.sql` once in **Supabase Dashboard → SQL Editor** before publishing the upgraded app. This migration adds the action fields and makes the existing file columns nullable without deleting or recreating any existing resource rows.
+
+For a brand-new database, the updated `supabase/schema.sql` already includes these columns.

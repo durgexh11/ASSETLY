@@ -42,7 +42,9 @@ function App() {
   const [notice, setNotice] = useState("");
   const [saving, setSaving] = useState(false);
   const [editing, setEditing] = useState(null);
-  const [form, setForm] = useState({ title:"", category:"PDF Notes", description:"", featured:false });
+  const [form, setForm] = useState({ title:"", category:"PDF Notes", description:"", featured:false, action_type:"download", action_url:"", copy_content:"", action_label:"" });
+  const [manageQuery, setManageQuery] = useState("");
+  const [manageCategory, setManageCategory] = useState("All");
   const [posterFile, setPosterFile] = useState(null);
   const [resourceFile, setResourceFile] = useState(null);
   const [email, setEmail] = useState("");
@@ -119,39 +121,35 @@ function App() {
 
   const featured = visible.filter(item => item.featured).slice(0, 3);
   const downloadResource = async (item) => {
-    if (String(item.id).startsWith("demo-") || !item.file_url || item.file_url === "#") {
-      flash("Demo item only — upload a real file to enable downloads.");
+    const recordUse = () => {
+      if (!item.id || item.id === "preview" || String(item.id).startsWith("demo-")) return;
+      setResources(prev => prev.map(r => r.id === item.id ? { ...r, downloads: (r.downloads || 0) + 1 } : r));
+      if (supabase) supabase.rpc("increment_resource_downloads", { resource_id:item.id }).then(({error}) => { if(error) console.warn("Usage counter was not updated:",error.message); }).catch(error => console.warn("Usage counter was not updated:",error));
+    };
+    if (item.action_type === "visit") {
+      try { const url = new URL(item.action_url || ""); if (!["https:","http:"].includes(url.protocol)) throw new Error(); window.open(url.toString(), "_blank", "noopener,noreferrer"); recordUse(); }
+      catch { flash("This resource has an invalid website link."); }
       return;
     }
-
-    try {
-      // Supabase Storage supports the `download` query parameter. It asks
-      // Storage to return Content-Disposition: attachment, which works more
-      // reliably on mobile browsers than the HTML download attribute on a
-      // cross-origin URL.
-      const fileName = safeFileName(item.file_name || item.title || "assetly-download");
-      const downloadUrl = new URL(item.file_url, window.location.origin);
-      if (!["https:", "http:"].includes(downloadUrl.protocol)) {
-        throw new Error("This resource has an invalid download URL.");
+    if (item.action_type === "copy") {
+      if (!item.copy_content) return flash("There is no text to copy yet.");
+      try { await navigator.clipboard.writeText(item.copy_content); recordUse(); flash("Copied to clipboard."); }
+      catch {
+        const field=document.createElement("textarea"); field.value=item.copy_content; field.style.position="fixed"; field.style.opacity="0"; document.body.appendChild(field); field.select();
+        const ok=document.execCommand("copy"); field.remove(); if(ok) recordUse(); flash(ok ? "Copied to clipboard." : "Could not copy. Please select the text manually.");
       }
-      downloadUrl.searchParams.set("download", fileName);
-
-      // Update the counter first so navigation does not interrupt the RPC.
-      if (supabase) {
-        const { error } = await supabase.rpc("increment_resource_downloads", { resource_id: item.id });
-        if (error) console.warn("Download counter was not updated:", error.message);
-      }
-
-      setResources(prev => prev.map(r =>
-        r.id === item.id ? { ...r, downloads: (r.downloads || 0) + 1 } : r
-      ));
-
-      // Navigate directly to the attachment response. Avoid fetching the
-      // whole file into memory, which can fail for large files on phones.
-      window.location.assign(downloadUrl.toString());
-    } catch (error) {
-      flash(`Download could not start: ${error.message || "Please try again."}`);
+      return;
     }
+    if (String(item.id).startsWith("demo-") || !item.file_url || item.file_url === "#") { flash("Demo item only — upload a real file to enable downloads."); return; }
+    try {
+      const fileName=safeFileName(item.file_name || item.title || "assetly-download");
+      const downloadUrl=new URL(item.file_url,window.location.origin);
+      if (!["https:","http:"].includes(downloadUrl.protocol)) throw new Error("This resource has an invalid download URL.");
+      downloadUrl.searchParams.set("download",fileName);
+      if (supabase) { const {error}=await supabase.rpc("increment_resource_downloads",{resource_id:item.id}); if(error) console.warn("Download counter was not updated:",error.message); }
+      setResources(prev=>prev.map(r=>r.id===item.id?{...r,downloads:(r.downloads||0)+1}:r));
+      window.location.assign(downloadUrl.toString());
+    } catch(error) { flash(`Download could not start: ${error.message || "Please try again."}`); }
   };
 
   const handleAuth = async (event) => {
@@ -180,7 +178,7 @@ function App() {
 
   const resetForm = () => {
     setEditing(null);
-    setForm({ title:"", category:"PDF Notes", description:"", featured:false });
+    setForm({ title:"", category:"PDF Notes", description:"", featured:false, action_type:"download", action_url:"", copy_content:"", action_label:"" });
     setPosterFile(null); setResourceFile(null);
     if (posterInput.current) posterInput.current.value = "";
     if (resourceInput.current) resourceInput.current.value = "";
@@ -188,7 +186,7 @@ function App() {
 
   const startEdit = (item) => {
     setEditing(item);
-    setForm({ title:item.title || "", category:item.category || "Other", description:item.description || "", featured:Boolean(item.featured) });
+    setForm({ title:item.title || "", category:item.category || "Other", description:item.description || "", featured:Boolean(item.featured), action_type:item.action_type || "download", action_url:item.action_url || "", copy_content:item.copy_content || "", action_label:item.action_label || "" });
     setPosterFile(null); setResourceFile(null);
     setView("admin");
     window.scrollTo({ top:0, behavior:"smooth" });
@@ -207,7 +205,11 @@ function App() {
     event.preventDefault();
     if (!supabase || !isAdmin) return flash("Admin access is required.");
     if (!form.title.trim()) return flash("Please enter a resource title.");
-    if (!editing && (!posterFile || !resourceFile)) return flash("Choose both a poster image and a downloadable file.");
+    if (!editing && !posterFile) return flash("Choose a poster image.");
+    if (form.action_type === "download" && !editing && !resourceFile) return flash("Choose a file to download.");
+    if (form.action_type === "download" && editing && !resourceFile && !editing.file_url) return flash("Choose a downloadable file.");
+    if (form.action_type === "visit") { try { const u=new URL(form.action_url.trim()); if(!["https:","http:"].includes(u.protocol)) throw new Error(); } catch { return flash("Enter a valid URL starting with https:// or http://."); } }
+    if (form.action_type === "copy" && !form.copy_content.trim()) return flash("Enter the text users should copy.");
     setSaving(true);
     let posterPath = editing?.poster_path || null;
     let filePath = editing?.file_path || null;
@@ -215,12 +217,17 @@ function App() {
       let posterUrl = editing?.poster_url || "";
       let fileUrl = editing?.file_url || "";
       if (posterFile) { const uploaded = await uploadFile(posterFile, "posters"); posterUrl = uploaded.url; posterPath = uploaded.path; }
-      if (resourceFile) { const uploaded = await uploadFile(resourceFile, "downloads"); fileUrl = uploaded.url; filePath = uploaded.path; }
+      if (resourceFile && form.action_type === "download") { const uploaded = await uploadFile(resourceFile, "downloads"); fileUrl = uploaded.url; filePath = uploaded.path; }
+      const isDownload = form.action_type === "download";
       const payload = {
         title:form.title.trim(), category:form.category, description:form.description.trim(),
         featured:form.featured, poster_url:posterUrl, poster_path:posterPath,
-        file_url:fileUrl, file_path:filePath, file_name:resourceFile?.name || editing?.file_name || "",
-        file_size:resourceFile?.size ?? editing?.file_size ?? 0, published:true
+        action_type:form.action_type, action_url:form.action_type === "visit" ? form.action_url.trim() : null,
+        copy_content:form.action_type === "copy" ? form.copy_content : null,
+        action_label:form.action_label.trim() || (form.action_type === "visit" ? "Visit website" : form.action_type === "copy" ? "Copy text" : "Download now"),
+        file_url:isDownload ? fileUrl : null, file_path:isDownload ? filePath : null,
+        file_name:isDownload ? (resourceFile?.name || editing?.file_name || "") : null,
+        file_size:isDownload ? (resourceFile?.size ?? editing?.file_size ?? 0) : 0, published:true
       };
       const result = editing
         ? await supabase.from("resources").update(payload).eq("id", editing.id).select().single()
@@ -328,8 +335,9 @@ function App() {
       </>}
 
       {(view === "admin" || view === "manage") && isAdmin && <main className="admin-page">
-        <div className="admin-header"><div><p className="eyebrow">PRIVATE WORKSPACE</p><h1>ADMIN <em>STUDIO.</em></h1><p>Upload a poster and its file. Publish it to the public library.</p></div><button className="outline-button" onClick={() => setView("home")}><ArrowLeft size={15}/> View website</button></div>
-        <div className="admin-tabs"><button className={view === "admin" ? "active" : ""} onClick={() => { resetForm(); setView("admin"); }}><Plus size={15}/> Add resource</button><button className={view === "manage" ? "active" : ""} onClick={() => setView("manage")}><Grid2X2 size={15}/> Manage resources <span>{resources.length}</span></button></div>
+        <div className="admin-header"><div><p className="eyebrow">PRIVATE WORKSPACE</p><h1>ADMIN <em>STUDIO.</em></h1><p>Publish downloadable files, useful links, and copy-ready text to your public library.</p></div><button className="outline-button" onClick={() => setView("home")}><ArrowLeft size={15}/> View website</button></div>
+        <div className="admin-stats"><div><span>TOTAL RESOURCES</span><b>{resources.length}</b></div><div><span>TOTAL DOWNLOADS</span><b>{resources.reduce((sum,r)=>sum+Number(r.downloads||0),0).toLocaleString()}</b></div><div><span>CATEGORIES USED</span><b>{new Set(resources.map(r=>r.category)).size}</b></div></div>
+         <div className="admin-tabs"><button className={view === "admin" ? "active" : ""} onClick={() => { resetForm(); setView("admin"); }}><Plus size={15}/> Add resource</button><button className={view === "manage" ? "active" : ""} onClick={() => setView("manage")}><Grid2X2 size={15}/> Manage resources <span>{resources.length}</span></button></div>
         {view === "admin" ? <form className="upload-form" onSubmit={saveResource}>
           <div className="form-main">
             <div className="form-card"><div className="form-card-head"><span>01 / RESOURCE DETAILS</span><span>REQUIRED FIELDS *</span></div>
@@ -338,21 +346,25 @@ function App() {
               <label>Description<textarea rows="4" maxLength={350} value={form.description} onChange={e => setForm({...form,description:e.target.value})} placeholder="What is this resource and who is it useful for?"/></label>
               <label className="checkline"><input type="checkbox" checked={form.featured} onChange={e => setForm({...form,featured:e.target.checked})}/> Feature this resource on the library</label>
             </div>
-            <div className="form-card"><div className="form-card-head"><span>02 / FILES</span><span>POSTER + DOWNLOAD</span></div>
-              <div className="file-pickers">
-                <div className="file-pick"><input ref={posterInput} type="file" accept="image/png,image/jpeg,image/webp,image/avif" onChange={e => setPosterFile(e.target.files?.[0] || null)}/><div className="pick-visual"><FileImage size={24}/><b>{posterFile?.name || (editing ? "Replace poster (optional)" : "Choose poster image *")}</b><span>JPG, PNG, WEBP · max 8 MB</span></div><button type="button" className="outline-button" onClick={() => posterInput.current?.click()}><Upload size={14}/> Browse poster</button></div>
-                <div className="file-pick"><input ref={resourceInput} type="file" onChange={e => setResourceFile(e.target.files?.[0] || null)}/><div className="pick-visual"><FileArchive size={24}/><b>{resourceFile?.name || (editing ? "Replace download file (optional)" : "Choose resource file *")}</b><span>PDF, ZIP, PNG, PSD and more · max 50 MB</span></div><button type="button" className="outline-button" onClick={() => resourceInput.current?.click()}><Upload size={14}/> Browse file</button></div>
-              </div>
-              <p className="hint">Tip: use a portrait or square poster for the best gallery display. Files are stored privately from the admin controls and served as public downloads.</p>
+            <div className="form-card"><div className="form-card-head"><span>02 / POSTER IMAGE</span><span>REQUIRED</span></div>
+              <div className="file-pick"><input ref={posterInput} type="file" accept="image/png,image/jpeg,image/webp,image/avif" onChange={e => setPosterFile(e.target.files?.[0] || null)}/><div className="pick-visual"><FileImage size={24}/><b>{posterFile?.name || (editing ? "Current poster · replace optional" : "Choose poster image *")}</b><span>JPG, PNG, WEBP · max 8 MB</span></div><button type="button" className="outline-button" onClick={() => posterInput.current?.click()}><Upload size={14}/> Browse poster</button></div>
+            </div>
+            <div className="form-card"><div className="form-card-head"><span>03 / RESOURCE ACTION</span><span>CHOOSE ONE TYPE</span></div>
+              <label>Action type *<select value={form.action_type} onChange={e => {setForm({...form,action_type:e.target.value});setResourceFile(null);if(resourceInput.current)resourceInput.current.value="";}}><option value="download">Download a file</option><option value="visit">Visit a website / app</option><option value="copy">Copy text / prompt</option></select></label>
+              <label>Button label<input maxLength={40} value={form.action_label} onChange={e => setForm({...form,action_label:e.target.value})} placeholder={form.action_type === "visit" ? "Visit website" : form.action_type === "copy" ? "Copy prompt" : "Download now"}/></label>
+              {form.action_type === "download" && <div className="file-pick"><input ref={resourceInput} type="file" onChange={e => setResourceFile(e.target.files?.[0] || null)}/><div className="pick-visual"><FileArchive size={24}/><b>{resourceFile?.name || (editing?.file_name ? `Current: ${editing.file_name}` : "Choose resource file *")}</b><span>PDF, ZIP, PNG, PSD and more · max 50 MB</span></div><button type="button" className="outline-button" onClick={() => resourceInput.current?.click()}><Upload size={14}/> Browse file</button></div>}
+              {form.action_type === "visit" && <label>Website / Play Store URL *<input type="url" required value={form.action_url} onChange={e => setForm({...form,action_url:e.target.value})} placeholder="https://example.com"/></label>}
+              {form.action_type === "copy" && <label>Text to copy *<textarea rows="7" required value={form.copy_content} onChange={e => setForm({...form,copy_content:e.target.value})} placeholder="Paste your prompt, command, template or text here"/></label>}
+              <p className="hint">The action button appears inside the resource detail view. The poster is required for every resource.</p>
             </div>
           </div>
-          <aside className="form-side"><div className="form-card publish-card"><span className="eyebrow">READY WHEN YOU ARE</span><h3>{editing ? "Update this drop." : "Make it live."}</h3><p>Your resource appears in the public gallery as soon as you publish it.</p><button className="black-button full" disabled={saving}>{saving ? "Saving..." : <>{editing ? "Save changes" : "Publish resource"} <ArrowUpRight size={16}/></>}</button><button type="button" className="text-button" onClick={resetForm}>Clear form</button></div><div className="form-card"><ShieldCheck size={22}/><h4>Admin only</h4><p>Only accounts marked as admin in Supabase can publish, edit or delete resources.</p></div></aside>
-        </form> : <div className="manage-list">{resources.length === 0 ? <div className="empty-state"><FolderOpen/><h3>No resources yet</h3><p>Upload your first resource to get started.</p><button className="black-button" onClick={() => setView("admin")}>Add resource <Plus size={15}/></button></div> : resources.map(item => <div className="manage-row" key={item.id}><img src={item.poster_url} alt="" onError={e => {e.currentTarget.style.visibility="hidden"}}/><div className="manage-info"><b>{item.title}</b><span>{item.category} · {item.downloads || 0} downloads</span></div><button className="icon-btn" onClick={() => startEdit(item)} aria-label={`Edit ${item.title}`}><Settings size={17}/></button><button className="icon-btn danger" onClick={() => deleteResource(item)} aria-label={`Delete ${item.title}`}><Trash2 size={17}/></button></div>)}</div>}
+          <aside className="form-side"><div className="form-card publish-card"><span className="eyebrow">READY WHEN YOU ARE</span><h3>{editing ? "Update this drop." : "Make it live."}</h3><p>Your resource appears in the public gallery as soon as you publish it.</p><button type="button" className="outline-button full" onClick={() => setSelected({id:editing?.id || "preview",title:form.title || "Resource preview",category:form.category,description:form.description,poster_url:posterFile ? URL.createObjectURL(posterFile) : editing?.poster_url || "",action_type:form.action_type,action_url:form.action_url,copy_content:form.copy_content,action_label:form.action_label,file_size:resourceFile?.size || editing?.file_size || 0,downloads:editing?.downloads || 0})}>Preview resource <ArrowUpRight size={15}/></button><button className="black-button full" disabled={saving}>{saving ? "Saving..." : <>{editing ? "Save changes" : "Publish resource"} <ArrowUpRight size={16}/></>}</button><button type="button" className="text-button" onClick={resetForm}>Clear form</button></div><div className="form-card"><ShieldCheck size={22}/><h4>Admin only</h4><p>Only accounts marked as admin in Supabase can publish, edit or delete resources.</p></div></aside>
+        </form> : <><div className="manage-filters"><input value={manageQuery} onChange={e=>setManageQuery(e.target.value)} placeholder="Search resources..."/><select value={manageCategory} onChange={e=>setManageCategory(e.target.value)}>{CATEGORIES.map(c=><option key={c}>{c}</option>)}</select></div><div className="manage-list">{resources.length === 0 ? <div className="empty-state"><FolderOpen/><h3>No resources yet</h3><p>Upload your first resource to get started.</p><button className="black-button" onClick={() => setView("admin")}>Add resource <Plus size={15}/></button></div> : resources.filter(item => (manageCategory === "All" || item.category === manageCategory) && [item.title,item.description].some(v=>(v||"").toLowerCase().includes(manageQuery.toLowerCase()))).map(item => <div className="manage-row" key={item.id}><img src={item.poster_url} alt="" onError={e => {e.currentTarget.style.visibility="hidden"}}/><div className="manage-info"><b>{item.title}</b><span>{item.category} · {(item.action_type || "download").toUpperCase()} · {item.downloads || 0} downloads</span></div><button className="icon-btn" onClick={() => startEdit(item)} aria-label={`Edit ${item.title}`}><Settings size={17}/></button><button className="icon-btn danger" onClick={() => deleteResource(item)} aria-label={`Delete ${item.title}`}><Trash2 size={17}/></button></div>)}</div></>}
       </main>}
 
       {view !== "home" && !isAdmin && !authOpen && <main className="admin-page"><div className="empty-state"><ShieldCheck size={38}/><h2>Admin access required</h2><p>Sign in with the account that has been granted the admin role.</p><button className="black-button" onClick={() => setAuthOpen(true)}>Sign in <LogIn size={15}/></button><button className="text-button" onClick={() => setView("home")}>Back to library</button></div></main>}
 
-      {selected && <div className="modal-backdrop" onMouseDown={e => { if(e.target === e.currentTarget) setSelected(null); }}><div className="detail-modal"><button className="modal-close" onClick={() => setSelected(null)} aria-label="Close"><X size={20}/></button><div className="detail-image"><img src={selected.poster_url} alt={selected.title}/><span>{selected.category}</span></div><div className="detail-copy"><p className="eyebrow">ASSETLY RESOURCE / {String(selected.id).slice(0,6).toUpperCase()}</p><h2>{selected.title}</h2><p>{selected.description || "A useful digital resource, ready for your next project."}</p><div className="detail-meta"><span><Download size={14}/> {(selected.downloads || 0).toLocaleString()} downloads</span><span>{formatSize(selected.file_size)}</span></div><button className="black-button full" onClick={() => downloadResource(selected)}>Download now <ArrowDownToLine size={17}/></button><small>By downloading, you agree to use this resource according to its license.</small></div></div></div>}
+      {selected && <div className="modal-backdrop" onMouseDown={e => { if(e.target === e.currentTarget) setSelected(null); }}><div className="detail-modal"><button className="modal-close" onClick={() => setSelected(null)} aria-label="Close"><X size={20}/></button><div className="detail-image"><img src={selected.poster_url} alt={selected.title}/><span>{selected.category}</span></div><div className="detail-copy"><p className="eyebrow">ASSETLY RESOURCE / {String(selected.id).slice(0,6).toUpperCase()}</p><h2>{selected.title}</h2><p>{selected.description || "A useful digital resource, ready for your next project."}</p>{selected.action_type === "copy" && <pre className="copy-preview">{selected.copy_content}</pre>}<div className="detail-meta"><span><Download size={14}/> {(selected.downloads || 0).toLocaleString()} {selected.action_type === "visit" || selected.action_type === "copy" ? "uses" : "downloads"}</span>{(selected.action_type || "download") === "download" && <span>{formatSize(selected.file_size)}</span>}</div><button className="black-button full" onClick={() => selected.id === "preview" ? flash("This is a preview. Publish the resource to activate its button.") : downloadResource(selected)}>{selected.action_label || (selected.action_type === "visit" ? "Visit website" : selected.action_type === "copy" ? "Copy text" : "Download now")} {selected.action_type === "visit" ? <ExternalLink size={17}/> : selected.action_type === "copy" ? <Command size={17}/> : <ArrowDownToLine size={17}/>}</button>{selected.id !== "preview" && <small>Use this resource responsibly and follow its applicable license or website terms.</small>}</div></div></div>}
 
       {authOpen && <div className="modal-backdrop" onMouseDown={e => {if(e.target===e.currentTarget)setAuthOpen(false);}}><form className="auth-modal" onSubmit={handleAuth}><button type="button" className="modal-close" onClick={() => setAuthOpen(false)} aria-label="Close"><X size={19}/></button><div className="auth-mark">A✳</div><p className="eyebrow">WELCOME TO ASSETLY</p><h2>{authMode === "login" ? "Good to have you back." : "Create your account."}</h2><label>Email address<input type="email" required autoComplete="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="you@example.com"/></label><label>Password<input type="password" required minLength={6} autoComplete={authMode === "login" ? "current-password" : "new-password"} value={password} onChange={e => setPassword(e.target.value)} placeholder="At least 6 characters"/></label><button className="black-button full" disabled={authBusy}>{authBusy ? "Please wait..." : authMode === "login" ? "Sign in" : "Create account"} <ArrowRight size={16}/></button><button type="button" className="text-button" onClick={() => setAuthMode(authMode === "login" ? "signup" : "login")}>{authMode === "login" ? "New here? Create an account" : "Already registered? Sign in"}</button></form></div>}
 
@@ -369,8 +381,8 @@ function ResourceCard({ item, index, onOpen, onDownload }) {
         <span className="poster-index">{String(index + 1).padStart(2,"0")} / ASSETLY</span><span className="poster-category">{item.category}</span><span className="poster-open"><ArrowUpRight size={19}/></span>
       </div>
     </button>
-    <div className="resource-info"><div><span className="resource-type">{item.category}</span><h3>{item.title}</h3><p>{item.description || "A useful resource, ready to download."}</p></div><button className="download-circle" onClick={onDownload} aria-label={`Download ${item.title}`} title="Download"><ArrowDownToLine size={18}/></button></div>
-    <div className="resource-foot"><span>{(item.downloads || 0).toLocaleString()} DOWNLOADS</span><button onClick={onOpen}>VIEW DETAILS <ArrowUpRight size={12}/></button></div>
+    <div className="resource-info"><div><span className="resource-type">{item.category}</span><h3>{item.title}</h3></div><button className="download-circle" onClick={onOpen} aria-label={`View ${item.title}`} title="View details"><ArrowUpRight size={18}/></button></div>
+    <div className="resource-foot"><span>{(item.downloads || 0).toLocaleString()} {(item.action_type === "visit" || item.action_type === "copy") ? "USES" : "DOWNLOADS"}</span><button onClick={onOpen}>VIEW DETAILS <ArrowUpRight size={12}/></button></div>
   </article>;
 }
 
